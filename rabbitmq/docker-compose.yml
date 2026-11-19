@@ -1,0 +1,42 @@
+services:
+  rabbitmq:
+    image: ${RABBITMQ_IMAGE:-rabbitmq:3.13-management}
+    container_name: ${RABBITMQ_CONTAINER_NAME:-sd-rabbitmq}
+    hostname: ${RABBITMQ_HOSTNAME:-rabbitmq}
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?RABBITMQ_DEFAULT_USER is required}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?RABBITMQ_DEFAULT_PASS is required}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-/}
+
+    ports:
+      - "${RABBITMQ_BIND_ADDRESS:-0.0.0.0}:${RABBITMQ_AMQP_PORT:-5672}:5672"
+      - "${RABBITMQ_BIND_ADDRESS:-0.0.0.0}:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./config/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./config/definitions.json:/etc/rabbitmq/definitions.json:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "rabbitmq-diagnostics",
+          "-q",
+          "ping"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+    stop_grace_period: 30s
+
+volumes:
+  rabbitmq_data:
+    name: sd-rabbitmq-data
