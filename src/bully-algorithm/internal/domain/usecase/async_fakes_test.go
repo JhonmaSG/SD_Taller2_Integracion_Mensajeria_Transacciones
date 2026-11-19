@@ -21,8 +21,9 @@ func (r *asyncSagaRepo) Find(_ context.Context, id model.SagaID) (model.Saga, bo
 	return s, ok, nil
 }
 
-func (r *asyncSagaRepo) Save(_ context.Context, s model.Saga) error {
-	r.sagas[s.ID] = s
+func (r *asyncSagaRepo) Save(_ context.Context, s *model.Saga) error {
+	s.Version++
+	r.sagas[s.ID] = *s
 	return nil
 }
 
@@ -114,11 +115,11 @@ func (p *asyncProcessed) IsProcessed(_ context.Context, id model.MessageID) (boo
 	return p.seen[id], nil
 }
 
-func (p *asyncProcessed) MarkProcessed(_ context.Context, id model.MessageID) error {
-	if p.seen[id] {
+func (p *asyncProcessed) MarkProcessed(_ context.Context, record ports.ProcessedRecord) error {
+	if p.seen[record.MessageID] {
 		return model.ErrAlreadyProcessed
 	}
-	p.seen[id] = true
+	p.seen[record.MessageID] = true
 	return nil
 }
 

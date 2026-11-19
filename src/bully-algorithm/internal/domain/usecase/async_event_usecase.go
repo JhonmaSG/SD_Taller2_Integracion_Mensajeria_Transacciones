@@ -131,7 +131,15 @@ func (p *EventProcessor) process(ctx context.Context, msg model.Message) error {
 	if err := p.apply(ctx, msg); err != nil {
 		return err
 	}
-	if err := p.processed.MarkProcessed(ctx, msg.ID()); err != nil && !errors.Is(err, model.ErrAlreadyProcessed) {
+	key := msg.Key()
+	record := ports.ProcessedRecord{
+		MessageID:   msg.ID(),
+		Topic:       msg.Kind(),
+		NodeID:      key.NodeID,
+		LamportTS:   key.LamportTS,
+		ProcessedAt: p.now(),
+	}
+	if err := p.processed.MarkProcessed(ctx, record); err != nil && !errors.Is(err, model.ErrAlreadyProcessed) {
 		return fmt.Errorf("mark processed: %w", err)
 	}
 	return nil

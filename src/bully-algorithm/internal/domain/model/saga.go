@@ -29,6 +29,16 @@ const (
 	SagaFailed             SagaStatus = "FAILED"
 )
 
+// SagaStep identifica un paso de la saga. StepNone indica que ninguno falló.
+type SagaStep int
+
+const (
+	StepNone                SagaStep = 0
+	StepReserveResource     SagaStep = 1
+	StepReplicateAllocation SagaStep = 2
+	StepConfirmAndNotify    SagaStep = 3
+)
+
 // Motivos de rechazo antes de reservar.
 const (
 	ReasonInsufficientResources  = "INSUFFICIENT_RESOURCES"
@@ -38,17 +48,24 @@ const (
 // Saga es la transacción orquestada por el coordinador para una asignación.
 // Las transiciones validan el estado actual y devuelven error si son ilegales.
 type Saga struct {
-	ID                   SagaID
-	SourceNode           NodeID
-	Resource             Resource
-	LamportTS            LamportTime
-	Status               SagaStatus
-	ReservationID        string
-	FailureReason        string
-	CompensationAttempts int
-	Notified             bool
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                    SagaID
+	SourceNode            NodeID
+	Resource              Resource
+	LamportTS             LamportTime
+	Status                SagaStatus
+	ReservationID         string
+	FailureReason         string
+	FailedStep            SagaStep
+	CompensationRequired  bool
+	CompensationAttempts  int
+	CompensationLastError string
+	Notified              bool
+	NotificationRetries   int
+	NotificationLastError string
+	// Version lo asigna el repositorio en cada escritura para el CAS.
+	Version   uint64
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // NewSaga crea una saga en estado IN_PROGRESS a partir de una solicitud validada.
@@ -92,8 +109,8 @@ func (s *Saga) MarkReserved(reservationID string, at time.Time) error {
 	return nil
 }
 
-// Reject termina la saga como FAILED. Solo es válido si aún no hay reserva,
-// porque una saga con reserva debe compensarse.
+// Reject termina la saga como FAILED en el paso 1. Solo es válido si aún no hay
+// reserva, porque una saga con reserva debe compensarse.
 func (s *Saga) Reject(reason string, at time.Time) error {
 	if err := s.requireStatus(SagaInProgress); err != nil {
 		return err
@@ -106,6 +123,7 @@ func (s *Saga) Reject(reason string, at time.Time) error {
 	}
 	s.Status = SagaFailed
 	s.FailureReason = reason
+	s.FailedStep = StepReserveResource
 	s.UpdatedAt = at
 	return nil
 }
@@ -123,12 +141,36 @@ func (s *Saga) Complete(at time.Time) error {
 	return nil
 }
 
+// BeginCompensation marca el paso que falló y que la saga requiere compensación.
+func (s *Saga) BeginCompensation(failedStep SagaStep, at time.Time) error {
+	if err := s.requireStatus(SagaInProgress); err != nil {
+		return err
+	}
+	if failedStep == StepNone {
+		return errors.New("failed step is required")
+	}
+	s.CompensationRequired = true
+	s.FailedStep = failedStep
+	s.UpdatedAt = at
+	return nil
+}
+
 // RecordCompensationAttempt cuenta un intento de liberar la reserva.
 func (s *Saga) RecordCompensationAttempt(at time.Time) error {
 	if err := s.requireStatus(SagaInProgress, SagaCompensationFailed); err != nil {
 		return err
 	}
 	s.CompensationAttempts++
+	s.UpdatedAt = at
+	return nil
+}
+
+// RecordCompensationError guarda el error del último intento fallido.
+func (s *Saga) RecordCompensationError(lastError string, at time.Time) error {
+	if err := s.requireStatus(SagaInProgress, SagaCompensationFailed); err != nil {
+		return err
+	}
+	s.CompensationLastError = lastError
 	s.UpdatedAt = at
 	return nil
 }
@@ -167,6 +209,20 @@ func (s *Saga) MarkNotified(at time.Time) error {
 		return errors.New("saga already notified")
 	}
 	s.Notified = true
+	s.UpdatedAt = at
+	return nil
+}
+
+// RecordNotificationFailure cuenta un intento fallido de notificación.
+func (s *Saga) RecordNotificationFailure(lastError string, at time.Time) error {
+	if err := s.requireStatus(SagaCompleted); err != nil {
+		return err
+	}
+	if s.Notified {
+		return errors.New("saga already notified")
+	}
+	s.NotificationRetries++
+	s.NotificationLastError = lastError
 	s.UpdatedAt = at
 	return nil
 }

@@ -136,7 +136,7 @@ func (o *SagaOrchestrator) Start(ctx context.Context, req model.AllocationReques
 		return err
 	}
 	// La saga se persiste antes de cualquier efecto externo para poder retomarla.
-	if err := o.save(ctx, saga); err != nil {
+	if err := o.save(ctx, &saga); err != nil {
 		return err
 	}
 	return o.execute(ctx, &saga)
@@ -150,9 +150,15 @@ func (o *SagaOrchestrator) RetryPendingNotifications(ctx context.Context) error 
 		return fmt.Errorf("list pending notifications: %w", err)
 	}
 	var errs []error
-	for _, saga := range pending {
+	for i := range pending {
+		saga := &pending[i]
 		if err := o.deps.Notifier.NotifyAllocation(ctx, saga.ID, saga.SourceNode); err != nil {
 			errs = append(errs, fmt.Errorf("notify saga %s: %w", saga.ID, err))
+			if recErr := saga.RecordNotificationFailure(err.Error(), o.now()); recErr == nil {
+				if saveErr := o.save(ctx, saga); saveErr != nil {
+					errs = append(errs, saveErr)
+				}
+			}
 			continue
 		}
 		if err := saga.MarkNotified(o.now()); err != nil {
@@ -184,7 +190,7 @@ func (o *SagaOrchestrator) execute(ctx context.Context, saga *model.Saga) error 
 		// Sin respuesta no se sabe si el agente reservó. La liberación por saga_id es
 		// idempotente, así que se compensa igualmente.
 		log.Printf("saga=%s reserve failed, compensating: %v", saga.ID, err)
-		return o.compensate(ctx, saga)
+		return o.compensate(ctx, saga, model.StepReserveResource)
 	}
 	if !result.Accepted {
 		reason := result.Reason
@@ -195,33 +201,36 @@ func (o *SagaOrchestrator) execute(ctx context.Context, saga *model.Saga) error 
 	}
 	if err := saga.MarkReserved(result.ReservationID, o.now()); err != nil {
 		log.Printf("saga=%s invalid reservation response, compensating: %v", saga.ID, err)
-		return o.compensate(ctx, saga)
+		return o.compensate(ctx, saga, model.StepReserveResource)
 	}
-	if err := o.save(ctx, *saga); err != nil {
+	if err := o.save(ctx, saga); err != nil {
 		return err
 	}
 
 	// Paso 2: replicar la asignación. Si falla, se compensa el paso 1.
 	if err := o.deps.Allocations.Replicate(ctx, *saga); err != nil {
 		log.Printf("saga=%s replicate failed, compensating: %v", saga.ID, err)
-		return o.compensate(ctx, saga)
+		return o.compensate(ctx, saga, model.StepReplicateAllocation)
 	}
 
 	// Paso 3: confirmar y notificar. Un fallo de notificación no revierte la asignación.
 	if err := saga.Complete(o.now()); err != nil {
 		return err
 	}
-	if err := o.save(ctx, *saga); err != nil {
+	if err := o.save(ctx, saga); err != nil {
 		return err
 	}
 	if err := o.deps.Notifier.NotifyAllocation(ctx, saga.ID, saga.SourceNode); err != nil {
 		log.Printf("saga=%s completed, notification pending: %v", saga.ID, err)
-		return nil
+		if recErr := saga.RecordNotificationFailure(err.Error(), o.now()); recErr != nil {
+			return recErr
+		}
+		return o.save(ctx, saga)
 	}
 	if err := saga.MarkNotified(o.now()); err != nil {
 		return err
 	}
-	return o.save(ctx, *saga)
+	return o.save(ctx, saga)
 }
 
 // reject termina la saga como FAILED. No hay reserva que compensar.
@@ -229,18 +238,24 @@ func (o *SagaOrchestrator) reject(ctx context.Context, saga *model.Saga, reason 
 	if err := saga.Reject(reason, o.now()); err != nil {
 		return err
 	}
-	return o.save(ctx, *saga)
+	return o.save(ctx, saga)
 }
 
 // compensate libera la reserva con reintentos acotados. Al agotarlos, la saga
 // queda en COMPENSATION_FAILED con el motivo para revisión posterior.
-func (o *SagaOrchestrator) compensate(ctx context.Context, saga *model.Saga) error {
+func (o *SagaOrchestrator) compensate(ctx context.Context, saga *model.Saga, failedStep model.SagaStep) error {
+	if err := saga.BeginCompensation(failedStep, o.now()); err != nil {
+		return err
+	}
+	if err := o.save(ctx, saga); err != nil {
+		return err
+	}
 	var lastErr error
 	for attempt := 1; attempt <= o.compensation.MaxAttempts; attempt++ {
 		if err := saga.RecordCompensationAttempt(o.now()); err != nil {
 			return err
 		}
-		if err := o.save(ctx, *saga); err != nil {
+		if err := o.save(ctx, saga); err != nil {
 			return err
 		}
 		err := o.deps.Reservations.Release(ctx, saga.ID, saga.ReservationID)
@@ -248,10 +263,16 @@ func (o *SagaOrchestrator) compensate(ctx context.Context, saga *model.Saga) err
 			if err := saga.MarkCompensated(o.now()); err != nil {
 				return err
 			}
-			return o.save(ctx, *saga)
+			return o.save(ctx, saga)
 		}
 		lastErr = err
 		log.Printf("saga=%s compensation attempt %d/%d failed: %v", saga.ID, attempt, o.compensation.MaxAttempts, err)
+		if err := saga.RecordCompensationError(err.Error(), o.now()); err != nil {
+			return err
+		}
+		if err := o.save(ctx, saga); err != nil {
+			return err
+		}
 		if attempt < o.compensation.MaxAttempts {
 			if err := o.sleep(ctx, o.compensation.backoff(attempt)); err != nil {
 				return err
@@ -262,10 +283,10 @@ func (o *SagaOrchestrator) compensate(ctx context.Context, saga *model.Saga) err
 	if err := saga.MarkCompensationFailed(reason, o.now()); err != nil {
 		return err
 	}
-	return o.save(ctx, *saga)
+	return o.save(ctx, saga)
 }
 
-func (o *SagaOrchestrator) save(ctx context.Context, saga model.Saga) error {
+func (o *SagaOrchestrator) save(ctx context.Context, saga *model.Saga) error {
 	if err := o.deps.Sagas.Save(ctx, saga); err != nil {
 		return fmt.Errorf("save saga %s: %w", saga.ID, err)
 	}

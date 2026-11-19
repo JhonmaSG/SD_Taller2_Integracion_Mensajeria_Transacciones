@@ -2,15 +2,25 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/domain/model"
 )
+
+// ProcessedRecord es el registro de un mensaje aplicado.
+type ProcessedRecord struct {
+	MessageID   model.MessageID
+	Topic       model.Kind
+	NodeID      model.NodeID
+	LamportTS   model.LamportTime
+	ProcessedAt time.Time
+}
 
 // ProcessedMessageStore registra los message_id ya procesados para descartar duplicados.
 type ProcessedMessageStore interface {
 	IsProcessed(ctx context.Context, id model.MessageID) (bool, error)
 	// MarkProcessed registra el mensaje. Devuelve model.ErrAlreadyProcessed si ya existía.
-	MarkProcessed(ctx context.Context, id model.MessageID) error
+	MarkProcessed(ctx context.Context, record ProcessedRecord) error
 }
 
 // MetricsRepository guarda el estado más reciente reportado por cada nodo.
@@ -25,8 +35,10 @@ type MetricsRepository interface {
 type SagaRepository interface {
 	// Find devuelve la saga con ese identificador. El bool indica si existe.
 	Find(ctx context.Context, id model.SagaID) (model.Saga, bool, error)
-	// Save persiste el estado completo de la saga.
-	Save(ctx context.Context, saga model.Saga) error
+	// Save persiste el estado de la saga con CAS sobre saga.Version. Si el
+	// repositorio aceptó la escritura, actualiza saga.Version. Devuelve
+	// ErrVersionConflict si otra escritura se adelantó.
+	Save(ctx context.Context, saga *model.Saga) error
 	// PendingNotifications devuelve las sagas COMPLETED sin notificar.
 	PendingNotifications(ctx context.Context) ([]model.Saga, error)
 }
