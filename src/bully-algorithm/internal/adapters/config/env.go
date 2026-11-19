@@ -20,6 +20,11 @@ const (
 	defaultHeartbeatMillis = 1000
 	defaultDatabaseName    = "inventory"
 	defaultNodeCollection  = "nodes"
+	// defaultCausalWindowMillis es la ventana de orden causal (opción A).
+	defaultCausalWindowMillis = 3000
+	// defaultMetricsIntervalMillis es el periodo de publicación de metrics (2 a 5 s).
+	defaultMetricsIntervalMillis = 3000
+	defaultConsumerPrefetch      = 100
 )
 
 // Config contiene la configuración necesaria para ensamblar un nodo.
@@ -32,6 +37,11 @@ type Config struct {
 	DatabaseURI       string
 	DatabaseName      string
 	NodeCollection    string
+	// RabbitMQURL vacío deja desactivado el flujo asíncrono del nodo.
+	RabbitMQURL      string
+	CausalWindow     time.Duration
+	MetricsInterval  time.Duration
+	ConsumerPrefetch int
 }
 
 // StaticMembership implementa la membresía desde configuración estática.
@@ -139,6 +149,19 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, errors.New("DB_NAME and DB_NODE_COLLECTION must not be empty")
 	}
 
+	causalWindowMillis, err := positiveIntEnv("CAUSAL_WINDOW_MS", defaultCausalWindowMillis)
+	if err != nil {
+		return Config{}, err
+	}
+	metricsIntervalMillis, err := positiveIntEnv("METRICS_INTERVAL_MS", defaultMetricsIntervalMillis)
+	if err != nil {
+		return Config{}, err
+	}
+	prefetch, err := positiveIntEnv("CONSUMER_PREFETCH", defaultConsumerPrefetch)
+	if err != nil {
+		return Config{}, err
+	}
+
 	local := model.Node{ID: model.NodeID(nodeID), Address: localAddress}
 	membership, err := NewStaticMembership(local, peers)
 	if err != nil {
@@ -154,7 +177,25 @@ func LoadFromEnv() (Config, error) {
 		DatabaseURI:       databaseURI,
 		DatabaseName:      databaseName,
 		NodeCollection:    nodeCollection,
+		RabbitMQURL:       strings.TrimSpace(os.Getenv("RABBITMQ_URL")),
+		CausalWindow:      time.Duration(causalWindowMillis) * time.Millisecond,
+		MetricsInterval:   time.Duration(metricsIntervalMillis) * time.Millisecond,
+		ConsumerPrefetch:  prefetch,
 	}, nil
+}
+
+// positiveIntEnv lee un entero positivo de una variable de entorno. Si no está
+// definida, devuelve fallback.
+func positiveIntEnv(name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
 }
 
 // LoadDotEnvFile carga un archivo .env sin sobrescribir variables ya definidas.

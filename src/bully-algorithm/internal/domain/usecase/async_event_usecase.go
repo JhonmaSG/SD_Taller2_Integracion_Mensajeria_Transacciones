@@ -14,7 +14,7 @@ import (
 
 // EventProcessorDeps agrupa las dependencias del procesador de eventos.
 type EventProcessorDeps struct {
-	Clock     *model.LamportClock
+	Clock     ports.LamportClock
 	Buffer    *model.CausalBuffer[model.Message]
 	Processed ports.ProcessedMessageStore
 	Metrics   ports.MetricsRepository
@@ -32,7 +32,7 @@ type EventProcessorDeps struct {
 // como cabeza del buffer y se reintenta en el siguiente DrainReady.
 type EventProcessor struct {
 	mu        sync.Mutex
-	clock     *model.LamportClock
+	clock     ports.LamportClock
 	buffer    *model.CausalBuffer[model.Message]
 	processed ports.ProcessedMessageStore
 	metrics   ports.MetricsRepository
