@@ -258,7 +258,7 @@ func (o *SagaOrchestrator) compensate(ctx context.Context, saga *model.Saga, fai
 		if err := o.save(ctx, saga); err != nil {
 			return err
 		}
-		err := o.deps.Reservations.Release(ctx, saga.ID, saga.ReservationID)
+		err := o.deps.Reservations.Release(ctx, saga.ID, saga.SourceNode, saga.ReservationID)
 		if err == nil {
 			if err := saga.MarkCompensated(o.now()); err != nil {
 				return err

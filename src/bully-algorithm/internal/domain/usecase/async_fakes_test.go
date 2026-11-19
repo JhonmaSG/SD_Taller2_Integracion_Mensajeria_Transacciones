@@ -74,7 +74,7 @@ func (r *asyncReservations) Reserve(_ context.Context, _ model.SagaID, _ model.N
 	return r.reply, nil
 }
 
-func (r *asyncReservations) Release(_ context.Context, _ model.SagaID, _ string) error {
+func (r *asyncReservations) Release(_ context.Context, _ model.SagaID, _ model.NodeID, _ string) error {
 	r.releaseCalls++
 	if r.releaseCalls <= r.releaseFailures {
 		return r.releaseErr

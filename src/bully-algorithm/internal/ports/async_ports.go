@@ -66,8 +66,8 @@ type ReservationResult struct {
 type ResourceReservationPort interface {
 	// Reserve es idempotente por sagaID: un reintento devuelve la misma reserva.
 	Reserve(ctx context.Context, sagaID model.SagaID, node model.NodeID, resource model.Resource) (ReservationResult, error)
-	// Release libera la reserva de la saga. Es idempotente por sagaID.
-	Release(ctx context.Context, sagaID model.SagaID, reservationID string) error
+	// Release libera la reserva de la saga en el nodo indicado. Es idempotente por sagaID.
+	Release(ctx context.Context, sagaID model.SagaID, node model.NodeID, reservationID string) error
 }
 
 // AgentNotifier envía al agente la confirmación de su asignación.
