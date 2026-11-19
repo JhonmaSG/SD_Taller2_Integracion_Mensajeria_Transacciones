@@ -20,7 +20,6 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
       - ./config/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
-      - ./config/definitions.json:/etc/rabbitmq/definitions.json:ro
 
     healthcheck:
       test:
