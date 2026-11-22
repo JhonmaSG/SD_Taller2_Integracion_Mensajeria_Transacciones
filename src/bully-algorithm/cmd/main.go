@@ -63,7 +63,13 @@ func run() error {
 	runtimeContext, stopRuntime := context.WithCancel(context.Background())
 	defer stopRuntime()
 
-	transport := grpcadapter.NewElectionTransport()
+	// Un único reloj de Lamport para todo el nodo. Las llamadas gRPC entrantes y
+	// salientes lo sincronizan, y el consumidor y los publicadores lo usan para
+	// sellar sus mensajes.
+	clock := newSyncClock()
+	transport := grpcadapter.NewElectionTransport(
+		grpc.WithUnaryInterceptor(grpcadapter.LamportClientInterceptor(clock)),
+	)
 	election, err := usecase.NewBullyElectionUseCaseWithTimeout(
 		membership,
 		transport,
@@ -103,12 +109,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create agent gRPC adapter: %w", err)
 	}
-	agentClient, err := grpcadapter.NewAgentClient(membership, cfg.ElectionTimeout)
+	agentClient, err := grpcadapter.NewAgentClient(
+		membership,
+		cfg.ElectionTimeout,
+		grpc.WithUnaryInterceptor(grpcadapter.LamportClientInterceptor(clock)),
+	)
 	if err != nil {
 		return fmt.Errorf("create agent client: %w", err)
 	}
 
-	async, err := newAsyncRuntime(runtimeContext, cfg, membership, agentClient)
+	async, err := newAsyncRuntime(runtimeContext, cfg, membership, agentClient, clock)
 	if err != nil {
 		return fmt.Errorf("create asynchronous runtime: %w", err)
 	}
@@ -122,7 +132,9 @@ func run() error {
 	}
 	defer listener.Close()
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpcadapter.LamportServerInterceptor(clock)),
+	)
 	electionServer.Register(grpcServer)
 	agentServer.Register(grpcServer)
 	serverErrors := make(chan error, 1)

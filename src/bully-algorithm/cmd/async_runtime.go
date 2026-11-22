@@ -79,12 +79,13 @@ func newAsyncRuntime(
 	cfg config.Config,
 	membership ports.MembershipPort,
 	agents *grpcadapter.AgentClient,
+	clock *syncClock,
 ) (*asyncRuntime, error) {
 	runtime := &asyncRuntime{
 		ctx:        ctx,
 		cfg:        cfg,
 		membership: membership,
-		clock:      newSyncClock(),
+		clock:      clock,
 		agents:     agents,
 	}
 	if cfg.RabbitMQURL == "" {
