@@ -1,6 +1,6 @@
 # Cómo usar los scripts
 
-## `scripts/install-docker.sh`
+## `scripts/preparar-nodo.sh`
 
 ### 1. Qué hace y para qué sirve
 
@@ -29,7 +29,7 @@ El script:
 **Inicio de la ejecución:** ejecuta únicamente el script con:
 
 ```bash
-sudo bash install-docker.sh
+sudo bash scripts/preparar-nodo.sh
 ```
 
 Al ejecutar ese comando, el script realiza automáticamente los siguientes pasos, en este orden:
