@@ -89,9 +89,10 @@ func (p *EventProcessor) Receive(msg model.Message) (bool, error) {
 	key := msg.Key()
 	p.clock.Observe(key.LamportTS)
 	if err := p.buffer.Push(key, p.now(), msg); err != nil {
-		log.Printf("discarded message=%s kind=%s: %v", msg.ID(), msg.Kind(), err)
+		log.Printf("discarded message=%s kind=%s lamport=%d node=%d: %v", msg.ID(), msg.Kind(), key.LamportTS, key.NodeID, err)
 		return false, nil
 	}
+	log.Printf("queued message=%s kind=%s lamport=%d node=%d buffered=%d", msg.ID(), msg.Kind(), key.LamportTS, key.NodeID, p.buffer.Len())
 	return true, nil
 }
 
@@ -111,7 +112,9 @@ func (p *EventProcessor) DrainReady(ctx context.Context) ([]model.MessageID, err
 		if err := p.process(ctx, msg); err != nil {
 			return done, fmt.Errorf("process message %s: %w", msg.ID(), err)
 		}
+		key := msg.Key()
 		p.buffer.Release()
+		log.Printf("released message=%s kind=%s lamport=%d node=%d position=%d buffered=%d", msg.ID(), msg.Kind(), key.LamportTS, key.NodeID, len(done)+1, p.buffer.Len())
 		done = append(done, msg.ID())
 	}
 }

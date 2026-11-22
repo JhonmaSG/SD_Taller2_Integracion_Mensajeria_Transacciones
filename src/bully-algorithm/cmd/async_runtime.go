@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
+	"net"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/config"
 	grpcadapter "github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/grpc"
+	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/httpapi"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/persistence"
 	rabbitmqadapter "github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/rabbitmq"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/system"
@@ -22,6 +26,13 @@ const (
 	consumerDrainInterval  = 200 * time.Millisecond
 	failoverPublishTimeout = 30 * time.Second
 	storeCloseTimeout      = 5 * time.Second
+	// manualMetricsPublishTimeout limita cada POST /metrics. Cubre el reintento
+	// completo de publicación de RabbitMQ para que la respuesta sea definitiva.
+	manualMetricsPublishTimeout    = 30 * time.Second
+	manualMetricsReadHeaderTimeout = 5 * time.Second
+	// manualMetricsPort es el puerto HTTP del endpoint manual. Usa el mismo host
+	// que el nodo (LISTEN_ADDRESS o NODE_HOST).
+	manualMetricsPort = "8080"
 )
 
 // syncClock es el reloj de Lamport del nodo. Lo usan el consumidor, los
@@ -68,6 +79,7 @@ type asyncRuntime struct {
 	reporter  *usecase.MetricsReporter
 
 	mu              sync.Mutex
+	httpServer      *http.Server
 	store           *persistence.AsyncStore
 	orchestrator    *usecase.SagaOrchestrator
 	wantCoordinator bool
@@ -126,13 +138,56 @@ func (r *asyncRuntime) enabled() bool {
 	return r.publisher != nil
 }
 
-// start inicia la publicación periódica de métricas y la conexión a MongoDB.
+// start inicia la publicación de métricas y la conexión a MongoDB. Con
+// MANUAL_METRICS=true no hay reporte periódico: las métricas se publican solo
+// con POST al endpoint manual.
 func (r *asyncRuntime) start() {
 	if !r.enabled() {
 		return
 	}
-	go r.reportMetrics()
+	if r.cfg.ManualMetrics {
+		log.Printf("MANUAL_METRICS=true: periodic metrics disabled, metrics are published only with POST /metrics")
+		r.startManualMetricsAPI()
+	} else {
+		go r.reportMetrics()
+	}
 	go r.connectStore()
+}
+
+// startManualMetricsAPI abre el servidor HTTP con POST /metrics en el host del
+// nodo y el puerto manualMetricsPort. Si no se puede abrir, el nodo sigue
+// funcionando sin endpoint y lo registra.
+func (r *asyncRuntime) startManualMetricsAPI() {
+	host, _, err := net.SplitHostPort(r.cfg.LocalNode.Address)
+	if err != nil {
+		log.Printf("manual metrics API disabled: invalid local address %q: %v", r.cfg.LocalNode.Address, err)
+		return
+	}
+	address := net.JoinHostPort(host, manualMetricsPort)
+
+	handler, err := httpapi.NewMetricsHandler(r.reporter, manualMetricsPublishTimeout)
+	if err != nil {
+		log.Printf("manual metrics API disabled: %v", err)
+		return
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Printf("manual metrics API disabled, cannot listen on %s: %v", address, err)
+		return
+	}
+	log.Printf("manual metrics API listening on %s: POST /metrics", address)
+	server := &http.Server{
+		Handler:           handler.Routes(),
+		ReadHeaderTimeout: manualMetricsReadHeaderTimeout,
+	}
+	r.mu.Lock()
+	r.httpServer = server
+	r.mu.Unlock()
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("manual metrics API stopped: %v", err)
+		}
+	}()
 }
 
 // onRole recibe los cambios de rol de Bully. Debe ser rápido: el trabajo de
@@ -167,8 +222,17 @@ func (r *asyncRuntime) shutdown() {
 	r.stopConsumerLocked()
 	store := r.store
 	r.store = nil
+	server := r.httpServer
+	r.httpServer = nil
 	r.mu.Unlock()
 
+	if server != nil {
+		httpCtx, cancel := context.WithTimeout(context.Background(), storeCloseTimeout)
+		defer cancel()
+		if err := server.Shutdown(httpCtx); err != nil {
+			log.Printf("shutdown manual metrics API: %v", err)
+		}
+	}
 	if err := r.publisher.Close(); err != nil {
 		log.Printf("close RabbitMQ publisher: %v", err)
 	}

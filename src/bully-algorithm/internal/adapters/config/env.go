@@ -42,6 +42,9 @@ type Config struct {
 	CausalWindow     time.Duration
 	MetricsInterval  time.Duration
 	ConsumerPrefetch int
+	// ManualMetrics desactiva el reporte periódico de métricas. Las métricas se
+	// publican solo con POST /metrics.
+	ManualMetrics bool
 }
 
 // StaticMembership implementa la membresía desde configuración estática.
@@ -161,6 +164,10 @@ func LoadFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	manualMetrics, err := boolEnv("MANUAL_METRICS", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	local := model.Node{ID: model.NodeID(nodeID), Address: localAddress}
 	membership, err := NewStaticMembership(local, peers)
@@ -181,7 +188,22 @@ func LoadFromEnv() (Config, error) {
 		CausalWindow:      time.Duration(causalWindowMillis) * time.Millisecond,
 		MetricsInterval:   time.Duration(metricsIntervalMillis) * time.Millisecond,
 		ConsumerPrefetch:  prefetch,
+		ManualMetrics:     manualMetrics,
 	}, nil
+}
+
+// boolEnv lee true o false de una variable de entorno. Si no está definida,
+// devuelve fallback.
+func boolEnv(name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", name)
+	}
+	return value, nil
 }
 
 // positiveIntEnv lee un entero positivo de una variable de entorno. Si no está
