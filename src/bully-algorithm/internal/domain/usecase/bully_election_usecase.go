@@ -108,10 +108,21 @@ func (uc *BullyElectionUseCase) Start(ctx context.Context) (model.ElectionResult
 		return result, nil
 	}
 	uc.inProgress = true
-	uc.coordinator = nil
-	uc.lastResult = model.ElectionResult{
-		State:               model.ElectionInProgress,
-		HigherPriorityNodes: countHigherPriority(local, peers),
+	// Si el nodo local no tiene ningún peer superior en la membresía (es el nodo
+	// con mayor ID, como el nodo 3), no borramos el coordinador para evitar
+	// rechazar escrituras y heartbeats legítimos durante la fase de anuncio.
+	if countHigherPriority(local, peers) == 0 {
+		uc.coordinator = &local
+		uc.lastResult = model.ElectionResult{
+			State:       model.ElectionCoordinator,
+			Coordinator: &local,
+		}
+	} else {
+		uc.coordinator = nil
+		uc.lastResult = model.ElectionResult{
+			State:               model.ElectionInProgress,
+			HigherPriorityNodes: countHigherPriority(local, peers),
+		}
 	}
 	uc.mu.Unlock()
 
@@ -137,6 +148,19 @@ func (uc *BullyElectionUseCase) Start(ctx context.Context) (model.ElectionResult
 		uc.inProgress = false
 		uc.lastResult = result
 		uc.mu.Unlock()
+
+		go func() {
+			time.Sleep(uc.electionTimeout)
+			uc.mu.RLock()
+			stillWaiting := uc.lastResult.State == model.ElectionWaitingForCoordinator && uc.coordinator == nil
+			uc.mu.RUnlock()
+			if stillWaiting {
+				electionCtx, cancel := context.WithTimeout(context.Background(), uc.electionTimeout)
+				defer cancel()
+				_, _ = uc.Start(electionCtx)
+			}
+		}()
+
 		return result.Clone(), nil
 	}
 
@@ -226,6 +250,23 @@ func (uc *BullyElectionUseCase) HandleElection(ctx context.Context, candidate mo
 	}
 	if !local.HasHigherPriorityThan(candidate) {
 		return false, nil
+	}
+
+	uc.mu.RLock()
+	isCoord := uc.lastResult.State == model.ElectionCoordinator &&
+		uc.lastResult.Coordinator != nil && uc.lastResult.Coordinator.SameIdentity(local)
+	uc.mu.RUnlock()
+
+	if isCoord {
+		// El nodo local ya es el coordinador activo. Confirmamos inmediatamente
+		// nuestra autoridad enviándole un anuncio al candidato sin reiniciar el
+		// estado en memoria ni interrumpir heartbeats o escrituras.
+		go func() {
+			announceCtx, cancel := context.WithTimeout(context.Background(), uc.electionTimeout)
+			defer cancel()
+			_ = uc.transport.AnnounceCoordinator(announceCtx, local, candidate, local)
+		}()
+		return true, nil
 	}
 
 	go func() {
