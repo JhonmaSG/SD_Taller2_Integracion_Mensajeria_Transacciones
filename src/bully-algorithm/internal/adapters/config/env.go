@@ -115,9 +115,10 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("NODE_PORT must be a valid port: %w", err)
 	}
 
-	localAddress := strings.TrimSpace(os.Getenv("LISTEN_ADDRESS"))
-	if localAddress == "" {
-		localAddress = net.JoinHostPort(host, port)
+	advertisedAddress := net.JoinHostPort(host, port)
+	listenAddress := strings.TrimSpace(os.Getenv("LISTEN_ADDRESS"))
+	if listenAddress == "" {
+		listenAddress = advertisedAddress
 	}
 
 	peers, err := parsePeers(os.Getenv("PEERS"))
@@ -169,7 +170,7 @@ func LoadFromEnv() (Config, error) {
 		return Config{}, err
 	}
 
-	local := model.Node{ID: model.NodeID(nodeID), Address: localAddress}
+	local := model.Node{ID: model.NodeID(nodeID), Address: advertisedAddress}
 	membership, err := NewStaticMembership(local, peers)
 	if err != nil {
 		return Config{}, err
@@ -178,7 +179,7 @@ func LoadFromEnv() (Config, error) {
 	return Config{
 		LocalNode:         membership.LocalNode(),
 		Peers:             membership.Peers(),
-		ListenAddress:     localAddress,
+		ListenAddress:     listenAddress,
 		ElectionTimeout:   time.Duration(timeoutMillis) * time.Millisecond,
 		HeartbeatInterval: time.Duration(heartbeatMillis) * time.Millisecond,
 		DatabaseURI:       databaseURI,

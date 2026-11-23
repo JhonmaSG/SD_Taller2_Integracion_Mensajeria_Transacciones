@@ -136,3 +136,34 @@ bash scripts/enviar_archivos.sh docs/
   ```
 
 - El mensaje `Envío finalizado` no confirma que todas las copias hayan sido exitosas; las líneas `OK`, `AVISO` y `ERROR` indican el resultado de cada nodo y cada archivo o carpeta.
+
+## `scripts/levantar_vm.sh` y `docker-compose.yml`
+
+### 1. Qué hace y para qué sirve
+Permite levantar el stack de servicios de cada Máquina Virtual con Docker Compose usando perfiles (`nodo1`, `nodo2`, `nodo3`).
+
+- En **VM 1 (`nodo1`)**: Levanta `sd-mongod` y `sd-nodo` (ID 1).
+- En **VM 2 (`nodo2`)**: Levanta `sd-mongod` y `sd-nodo` (ID 2).
+- En **VM 3 (`nodo3` - Coordinador)**: Levanta `sd-mongod`, `sd-rabbitmq`, `sd-mongo-init` y `sd-nodo` (ID 3).
+- Utiliza `network_mode: host` para comunicarse sin sobrecarga de NAT sobre la red Tailscale.
+
+### 2. Formas de ejecución
+```bash
+# Con número de nodo explícito:
+sudo bash scripts/levantar_vm.sh 1 --build -d
+sudo bash scripts/levantar_vm.sh 2 --build -d
+sudo bash scripts/levantar_vm.sh 3 --build -d
+
+# Sin argumento (detecta NODE_ID del archivo .env local):
+sudo bash scripts/levantar_vm.sh --build -d
+```
+
+### 3. Cómo verificar que funcionó
+- `sudo docker ps`: Los contenedores deben estar en estado `Up` o `Up (healthy)`.
+- `sudo docker logs -f sd-nodo`: El nodo Go debe mostrar conexión exitosa a MongoDB y participar en el algoritmo Bully.
+- Consulta en MongoDB (desde VM 3):
+  ```bash
+  sudo docker exec -it sd-mongod mongosh inventory --quiet --eval "db.nodes.find().pretty()"
+  ```
+  Los tres nodos deben figurar con `status: 'ONLINE'`.
+
