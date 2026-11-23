@@ -74,9 +74,10 @@ type asyncRuntime struct {
 	clock      *syncClock
 	agents     *grpcadapter.AgentClient
 
-	publisher *rabbitmqadapter.Publisher
-	announcer *usecase.LeadershipAnnouncer
-	reporter  *usecase.MetricsReporter
+	publisher   *rabbitmqadapter.Publisher
+	announcer   *usecase.LeadershipAnnouncer
+	reporter    *usecase.MetricsReporter
+	allocations *usecase.AllocationRequester
 
 	mu              sync.Mutex
 	httpServer      *http.Server
@@ -128,9 +129,14 @@ func newAsyncRuntime(
 	if err != nil {
 		return nil, err
 	}
+	allocations, err := usecase.NewAllocationRequester(deps)
+	if err != nil {
+		return nil, err
+	}
 	runtime.publisher = publisher
 	runtime.announcer = announcer
 	runtime.reporter = reporter
+	runtime.allocations = allocations
 	return runtime, nil
 }
 
@@ -147,37 +153,46 @@ func (r *asyncRuntime) start() {
 	}
 	if r.cfg.ManualMetrics {
 		log.Printf("MANUAL_METRICS=true: periodic metrics disabled, metrics are published only with POST /metrics")
-		r.startManualMetricsAPI()
 	} else {
 		go r.reportMetrics()
 	}
+	r.startHTTPAPI()
 	go r.connectStore()
 }
 
-// startManualMetricsAPI abre el servidor HTTP con POST /metrics en el host del
-// nodo y el puerto manualMetricsPort. Si no se puede abrir, el nodo sigue
-// funcionando sin endpoint y lo registra.
-func (r *asyncRuntime) startManualMetricsAPI() {
+// startHTTPAPI abre el servidor HTTP del nodo en el host del nodo y el puerto
+// manualMetricsPort. Expone POST /metrics y POST /allocations. Si no se puede
+// abrir, el nodo sigue funcionando sin la API y lo registra.
+func (r *asyncRuntime) startHTTPAPI() {
 	host, _, err := net.SplitHostPort(r.cfg.LocalNode.Address)
 	if err != nil {
-		log.Printf("manual metrics API disabled: invalid local address %q: %v", r.cfg.LocalNode.Address, err)
+		log.Printf("HTTP API disabled: invalid local address %q: %v", r.cfg.LocalNode.Address, err)
 		return
 	}
 	address := net.JoinHostPort(host, manualMetricsPort)
 
-	handler, err := httpapi.NewMetricsHandler(r.reporter, manualMetricsPublishTimeout)
+	metrics, err := httpapi.NewMetricsHandler(r.reporter, manualMetricsPublishTimeout)
 	if err != nil {
-		log.Printf("manual metrics API disabled: %v", err)
+		log.Printf("HTTP API disabled: %v", err)
 		return
 	}
+	allocations, err := httpapi.NewAllocationHandler(r.allocations, manualMetricsPublishTimeout)
+	if err != nil {
+		log.Printf("HTTP API disabled: %v", err)
+		return
+	}
+	mux := http.NewServeMux()
+	metrics.Register(mux)
+	allocations.Register(mux)
+
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Printf("manual metrics API disabled, cannot listen on %s: %v", address, err)
+		log.Printf("HTTP API disabled, cannot listen on %s: %v", address, err)
 		return
 	}
-	log.Printf("manual metrics API listening on %s: POST /metrics", address)
+	log.Printf("HTTP API listening on %s: POST /metrics, POST /allocations", address)
 	server := &http.Server{
-		Handler:           handler.Routes(),
+		Handler:           mux,
 		ReadHeaderTimeout: manualMetricsReadHeaderTimeout,
 	}
 	r.mu.Lock()

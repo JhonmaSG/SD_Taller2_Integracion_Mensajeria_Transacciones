@@ -34,11 +34,15 @@ func NewMetricsHandler(reporter MetricsReporter, timeout time.Duration) (*Metric
 	return &MetricsHandler{reporter: reporter, timeout: timeout}, nil
 }
 
-// Routes devuelve el enrutador con las rutas del nodo. Go responde 405 a
-// cualquier método distinto de POST en /metrics.
+// Register agrega POST /metrics al enrutador del nodo.
+func (h *MetricsHandler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /metrics", h.publish)
+}
+
+// Routes devuelve un enrutador solo con POST /metrics.
 func (h *MetricsHandler) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /metrics", h.publish)
+	h.Register(mux)
 	return mux
 }
 

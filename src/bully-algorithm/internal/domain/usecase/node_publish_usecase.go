@@ -123,6 +123,50 @@ func (a *LeadershipAnnouncer) AnnounceLeaderElected(ctx context.Context, previou
 	return nil
 }
 
+// AllocationRequester publica en el tópico allocations una solicitud de
+// asignación para el nodo local. El nodo local es el source_node, es decir, el
+// nodo donde se reserva el recurso.
+type AllocationRequester struct {
+	deps PublishDeps
+}
+
+// NewAllocationRequester valida las dependencias y crea el publicador de solicitudes.
+func NewAllocationRequester(deps PublishDeps) (*AllocationRequester, error) {
+	if err := deps.validate(); err != nil {
+		return nil, err
+	}
+	return &AllocationRequester{deps: withPublishDefaults(deps)}, nil
+}
+
+// Request valida el recurso, genera saga_id y message_id, avanza el reloj de
+// Lamport y publica ALLOCATION_REQUEST. Devuelve cuando el broker confirma la
+// publicación, sin esperar a que la saga termine.
+func (a *AllocationRequester) Request(ctx context.Context, resource model.Resource) (model.SagaID, model.MessageID, error) {
+	if ctx == nil {
+		return "", "", errors.New("context must not be nil")
+	}
+	if err := resource.Validate(); err != nil {
+		return "", "", fmt.Errorf("invalid resource: %w", err)
+	}
+
+	sagaID := model.SagaID(a.deps.NewID())
+	request := model.AllocationRequest{
+		MessageID:  a.deps.NewID(),
+		Type:       model.TypeAllocationRequest,
+		SourceNode: a.deps.NodeID,
+		Resource:   resource,
+		LamportTS:  a.deps.Clock.Tick(),
+		SagaID:     sagaID,
+	}
+	if err := request.Validate(); err != nil {
+		return "", "", fmt.Errorf("invalid allocation request: %w", err)
+	}
+	if err := a.deps.Publisher.Publish(ctx, request); err != nil {
+		return "", "", fmt.Errorf("publish allocation request: %w", err)
+	}
+	return sagaID, request.MessageID, nil
+}
+
 func withPublishDefaults(deps PublishDeps) PublishDeps {
 	if deps.NewID == nil {
 		deps.NewID = NewRandomMessageID
