@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -139,12 +140,16 @@ func (s *ElectionServer) AnnounceCoordinator(
 	)
 
 	if s.registrationUseCase != nil {
-		registered, registrationErr := s.registrationUseCase.Register(ctx)
-		if registrationErr != nil {
-			log.Printf("follower registration after coordinator change failed: %v", registrationErr)
-		} else if registered.ID != 0 {
-			log.Printf("node document synchronized after coordinator change node=%d role=%s", registered.ID, registered.Role)
-		}
+		go func() {
+			regCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			registered, registrationErr := s.registrationUseCase.Register(regCtx)
+			if registrationErr != nil {
+				log.Printf("follower registration after coordinator change failed: %v", registrationErr)
+			} else if registered.ID != 0 {
+				log.Printf("node document synchronized after coordinator change node=%d role=%s", registered.ID, registered.Role)
+			}
+		}()
 	}
 
 	return &electionpb.AnnounceCoordinatorResponse{Accepted: true}, nil

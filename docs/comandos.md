@@ -4,6 +4,9 @@ Cada comando indica en qué nodo se ejecuta y qué resultado se espera.
 
 ## 1. Infraestructura (SSH, Tailscale, conectividad)
 
+> [!TIP]
+> Para la guía paso a paso detallada sobre cómo configurar Tailscale en tu PC anfitriona y habilitar el acceso SSH con llave para copiar y pegar comandos fácilmente, consulta [`docs/guia_ssh_tailscale.md`](guia_ssh_tailscale.md).
+
 Ejecutar en el nodo de origen. Reemplazar `usuario` y las IPs de Tailscale.
 
 ```bash
@@ -31,6 +34,34 @@ rs.status()
 - Resultado esperado: `ok: 1` y un miembro en `PRIMARY`, los otros dos en `SECONDARY`.
 
 ## 3. Ejecución de los nodos (coordinador y agentes)
+
+### 3.1 Despliegue con Docker Compose (Recomendado)
+
+En cada VM, copiar el `.env` correspondiente (`.env.vm1`, `.env.vm2` o `.env.vm3`) a `.env`, y ejecutar:
+
+```bash
+# En Máquina 1:
+sudo bash scripts/levantar_vm.sh 1 --build -d
+
+# En Máquina 2:
+sudo bash scripts/levantar_vm.sh 2 --build -d
+
+# En Máquina 3 (Coordinador + RabbitMQ):
+sudo bash scripts/levantar_vm.sh 3 --build -d
+```
+
+Verificar estado en MongoDB (desde Máquina 3):
+```bash
+sudo docker exec -it sd-mongod mongosh inventory --quiet --eval "db.nodes.find().pretty()"
+```
+- Resultado esperado: Los tres nodos aparecen con `status: 'ONLINE'`, sus recursos de CPU/RAM detectados, y `node_3` con rol `COORDINATOR`.
+
+Ver logs en tiempo real del nodo:
+```bash
+sudo docker logs -f sd-nodo
+```
+
+### 3.2 Ejecución manual en binario (alternativa sin Docker)
 
 Configurar `src/bully-algorithm/.env` a partir de `.env.example` en cada nodo. Ver la tabla de variables en `src/bully-algorithm/README.md`.
 

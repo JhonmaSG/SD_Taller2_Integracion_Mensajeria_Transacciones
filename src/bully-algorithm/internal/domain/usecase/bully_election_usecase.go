@@ -11,6 +11,14 @@ import (
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/ports"
 )
 
+// RoleEvent se emite cuando el nodo local entra o sale del rol de coordinador.
+// PreviousLeader es el último coordinador observado distinto del nodo local
+// antes de este cambio, o 0 si no se conoce.
+type RoleEvent struct {
+	IsCoordinator  bool
+	PreviousLeader model.NodeID
+}
+
 // BullyElectionUseCase implementa una ronda del algoritmo del Matón.
 //
 // El caso de uso solo conoce puertos. Un adaptador gRPC puede transportar
@@ -28,6 +36,10 @@ type BullyElectionUseCase struct {
 	inProgress  bool
 	lastResult  model.ElectionResult
 	coordinator *model.Node
+
+	roleObserver        func(RoleEvent)
+	reportedCoordinator bool
+	observedLeader      model.NodeID
 }
 
 // NewBullyElectionUseCase construye el caso de uso con un timeout seguro para
@@ -65,6 +77,15 @@ func NewBullyElectionUseCaseWithTimeout(
 	}, nil
 }
 
+// SetRoleObserver registra la función que recibe los cambios de rol del nodo
+// local. Debe llamarse antes de iniciar la primera elección. La función se
+// ejecuta sin el mutex tomado, pero de forma síncrona: no debe bloquear.
+func (uc *BullyElectionUseCase) SetRoleObserver(observer func(RoleEvent)) {
+	uc.mu.Lock()
+	defer uc.mu.Unlock()
+	uc.roleObserver = observer
+}
+
 // Start inicia una elección local.
 //
 // Solo se consulta a nodos con un ID mayor. Si alguno responde, el nodo local
@@ -87,10 +108,21 @@ func (uc *BullyElectionUseCase) Start(ctx context.Context) (model.ElectionResult
 		return result, nil
 	}
 	uc.inProgress = true
-	uc.coordinator = nil
-	uc.lastResult = model.ElectionResult{
-		State:               model.ElectionInProgress,
-		HigherPriorityNodes: countHigherPriority(local, peers),
+	// Si el nodo local no tiene ningún peer superior en la membresía (es el nodo
+	// con mayor ID, como el nodo 3), no borramos el coordinador para evitar
+	// rechazar escrituras y heartbeats legítimos durante la fase de anuncio.
+	if countHigherPriority(local, peers) == 0 {
+		uc.coordinator = &local
+		uc.lastResult = model.ElectionResult{
+			State:       model.ElectionCoordinator,
+			Coordinator: &local,
+		}
+	} else {
+		uc.coordinator = nil
+		uc.lastResult = model.ElectionResult{
+			State:               model.ElectionInProgress,
+			HigherPriorityNodes: countHigherPriority(local, peers),
+		}
 	}
 	uc.mu.Unlock()
 
@@ -116,6 +148,19 @@ func (uc *BullyElectionUseCase) Start(ctx context.Context) (model.ElectionResult
 		uc.inProgress = false
 		uc.lastResult = result
 		uc.mu.Unlock()
+
+		go func() {
+			time.Sleep(uc.electionTimeout)
+			uc.mu.RLock()
+			stillWaiting := uc.lastResult.State == model.ElectionWaitingForCoordinator && uc.coordinator == nil
+			uc.mu.RUnlock()
+			if stillWaiting {
+				electionCtx, cancel := context.WithTimeout(context.Background(), uc.electionTimeout)
+				defer cancel()
+				_, _ = uc.Start(electionCtx)
+			}
+		}()
+
 		return result.Clone(), nil
 	}
 
@@ -129,6 +174,7 @@ func (uc *BullyElectionUseCase) Start(ctx context.Context) (model.ElectionResult
 		HigherPriorityNodes: len(higherPriority),
 	}
 	uc.mu.Unlock()
+	uc.syncRole()
 
 	// La fase de anuncios tiene su propio timeout. Si la consulta a los peers
 	// superiores consumió todo el timeout de la elección, reutilizar ctx aquí
@@ -179,6 +225,7 @@ func (uc *BullyElectionUseCase) HandleCoordinator(coordinator model.Node) (model
 	}
 	result := uc.lastResult.Clone()
 	uc.mu.Unlock()
+	uc.syncRole()
 
 	return result, nil
 }
@@ -203,6 +250,23 @@ func (uc *BullyElectionUseCase) HandleElection(ctx context.Context, candidate mo
 	}
 	if !local.HasHigherPriorityThan(candidate) {
 		return false, nil
+	}
+
+	uc.mu.RLock()
+	isCoord := uc.lastResult.State == model.ElectionCoordinator &&
+		uc.lastResult.Coordinator != nil && uc.lastResult.Coordinator.SameIdentity(local)
+	uc.mu.RUnlock()
+
+	if isCoord {
+		// El nodo local ya es el coordinador activo. Confirmamos inmediatamente
+		// nuestra autoridad enviándole un anuncio al candidato sin reiniciar el
+		// estado en memoria ni interrumpir heartbeats o escrituras.
+		go func() {
+			announceCtx, cancel := context.WithTimeout(context.Background(), uc.electionTimeout)
+			defer cancel()
+			_ = uc.transport.AnnounceCoordinator(announceCtx, local, candidate, local)
+		}()
+		return true, nil
 	}
 
 	go func() {
@@ -240,6 +304,35 @@ func (uc *BullyElectionUseCase) CurrentResult() model.ElectionResult {
 	defer uc.mu.RUnlock()
 
 	return uc.lastResult.Clone()
+}
+
+// syncRole compara el rol actual con el último reportado. Si cambió, notifica
+// al observador. Debe llamarse sin el mutex tomado.
+func (uc *BullyElectionUseCase) syncRole() {
+	local := uc.membership.LocalNode()
+
+	uc.mu.Lock()
+	isCoordinator := uc.lastResult.State == model.ElectionCoordinator &&
+		uc.lastResult.Coordinator != nil && uc.lastResult.Coordinator.SameIdentity(local)
+	previousLeader := uc.observedLeader
+	if uc.lastResult.Coordinator != nil {
+		uc.observedLeader = uc.lastResult.Coordinator.ID
+	}
+	if isCoordinator == uc.reportedCoordinator {
+		uc.mu.Unlock()
+		return
+	}
+	uc.reportedCoordinator = isCoordinator
+	observer := uc.roleObserver
+	uc.mu.Unlock()
+
+	if observer == nil {
+		return
+	}
+	if previousLeader == local.ID {
+		previousLeader = 0
+	}
+	observer(RoleEvent{IsCoordinator: isCoordinator, PreviousLeader: previousLeader})
 }
 
 type electionResponse struct {
@@ -352,11 +445,11 @@ func (uc *BullyElectionUseCase) membershipSnapshot() (model.Node, []model.Node, 
 
 func (uc *BullyElectionUseCase) finishWithState(state model.ElectionState, coordinator *model.Node) {
 	uc.mu.Lock()
-	defer uc.mu.Unlock()
-
 	uc.inProgress = false
 	uc.coordinator = coordinator
 	uc.lastResult = model.ElectionResult{State: state, Coordinator: coordinator}
+	uc.mu.Unlock()
+	uc.syncRole()
 }
 
 func filterHigherPriority(local model.Node, peers []model.Node) []model.Node {

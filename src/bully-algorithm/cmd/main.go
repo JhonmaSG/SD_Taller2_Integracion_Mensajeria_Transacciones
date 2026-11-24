@@ -12,10 +12,13 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/config"
 	grpcadapter "github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/grpc"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/persistence"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/adapters/system"
+	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/domain/model"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/domain/usecase"
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/ports"
 )
@@ -26,6 +29,8 @@ const (
 	// mongoRetryInterval es la pausa entre intentos de conexión a MongoDB
 	// mientras el proceso sigue participando en Bully.
 	mongoRetryInterval = 5 * time.Second
+	// capacityReadTimeout limita la lectura de capacidad del host al arrancar.
+	capacityReadTimeout = 10 * time.Second
 )
 
 func main() {
@@ -54,7 +59,17 @@ func run() error {
 		return fmt.Errorf("create membership: %w", err)
 	}
 
-	transport := grpcadapter.NewElectionTransport()
+	// runtimeContext controla todas las goroutines de fondo del nodo.
+	runtimeContext, stopRuntime := context.WithCancel(context.Background())
+	defer stopRuntime()
+
+	// Un único reloj de Lamport para todo el nodo. Las llamadas gRPC entrantes y
+	// salientes lo sincronizan, y el consumidor y los publicadores lo usan para
+	// sellar sus mensajes.
+	clock := newSyncClock()
+	transport := grpcadapter.NewElectionTransport(
+		grpc.WithUnaryInterceptor(grpcadapter.LamportClientInterceptor(clock)),
+	)
 	election, err := usecase.NewBullyElectionUseCaseWithTimeout(
 		membership,
 		transport,
@@ -80,13 +95,48 @@ func run() error {
 		return fmt.Errorf("create gRPC server adapter: %w", err)
 	}
 
+	// El agente reserva recursos con la capacidad total del host. Esta capacidad
+	// se fija al arrancar.
+	capacity, err := readAgentCapacity()
+	if err != nil {
+		return err
+	}
+	ledger, err := usecase.NewAgentReservationUseCase(cfg.LocalNode.ID, capacity)
+	if err != nil {
+		return fmt.Errorf("create agent reservation ledger: %w", err)
+	}
+	agentServer, err := grpcadapter.NewAgentServer(ledger)
+	if err != nil {
+		return fmt.Errorf("create agent gRPC adapter: %w", err)
+	}
+	agentClient, err := grpcadapter.NewAgentClient(
+		membership,
+		cfg.ElectionTimeout,
+		grpc.WithUnaryInterceptor(grpcadapter.LamportClientInterceptor(clock)),
+	)
+	if err != nil {
+		return fmt.Errorf("create agent client: %w", err)
+	}
+
+	async, err := newAsyncRuntime(runtimeContext, cfg, membership, agentClient, clock)
+	if err != nil {
+		return fmt.Errorf("create asynchronous runtime: %w", err)
+	}
+	// El observador se registra antes de la primera elección para no perder el
+	// cambio de rol inicial.
+	election.SetRoleObserver(async.onRole)
+
 	listener, err := net.Listen("tcp", cfg.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.ListenAddress, err)
 	}
 	defer listener.Close()
 
-	grpcServer := electionServer.NewGRPCServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpcadapter.LamportServerInterceptor(clock)),
+	)
+	electionServer.Register(grpcServer)
+	agentServer.Register(grpcServer)
 	serverErrors := make(chan error, 1)
 	go func() {
 		log.Printf("gRPC server listening on %s", cfg.ListenAddress)
@@ -99,8 +149,6 @@ func run() error {
 
 	// El monitor de heartbeats detecta la caída del coordinador y dispara una
 	// nueva elección sin depender de que el proceso reciba tráfico entrante.
-	runtimeContext, stopRuntime := context.WithCancel(context.Background())
-	defer stopRuntime()
 	go func() {
 		if err := heartbeat.Run(runtimeContext); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("heartbeat monitor stopped: %v", err)
@@ -113,18 +161,44 @@ func run() error {
 	persist := &persistenceLink{}
 	go persist.connect(runtimeContext, cfg, membership, election, transport, electionServer)
 
+	async.start()
+
 	log.Printf(
-		"node %d started with %d peer(s), MongoDB database=%s collection=%s heartbeat=%s",
+		"node %d started with %d peer(s), MongoDB database=%s collection=%s heartbeat=%s capacity=cpu:%.0f ram_mb:%d bandwidth_mbps:%.0f",
 		cfg.LocalNode.ID,
 		len(cfg.Peers),
 		cfg.DatabaseName,
 		cfg.NodeCollection,
 		cfg.HeartbeatInterval,
+		capacity.CPU,
+		capacity.RAMMB,
+		capacity.BandwidthMbps,
 	)
 
 	shutdownErr := waitForShutdown(grpcServer, serverErrors, stopRuntime)
+	async.shutdown()
 	persist.shutdown()
 	return shutdownErr
+}
+
+// readAgentCapacity convierte la capacidad física del host a la unidad del dominio
+// (CPU en núcleos, RAM en MB, ancho de banda en Mbps).
+func readAgentCapacity() (model.Resource, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), capacityReadTimeout)
+	defer cancel()
+
+	machine, err := system.NewMachineCapacityReader().Read(ctx)
+	if err != nil {
+		return model.Resource{}, fmt.Errorf("read machine capacity: %w", err)
+	}
+	if machine.BandwidthMbps == 0 {
+		log.Printf("link bandwidth unknown: reservations that request bandwidth will be rejected")
+	}
+	return model.Resource{
+		CPU:           float64(machine.CPUCores),
+		RAMMB:         uint64(machine.MemoryGB) * 1024,
+		BandwidthMbps: float64(machine.BandwidthMbps),
+	}, nil
 }
 
 // persistenceLink agrupa la conexión a MongoDB y los casos de uso que dependen

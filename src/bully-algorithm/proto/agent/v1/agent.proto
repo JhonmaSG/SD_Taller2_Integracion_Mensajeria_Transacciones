@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package agent.v1;
+
+option go_package = "github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/agent/v1;agentpb";
+
+// AgentService lo expone cada nodo para que el coordinador ejecute los pasos
+// de la saga de asignación. Todas las operaciones son idempotentes por saga_id.
+service AgentService {
+  // Reserve reserva recursos en el nodo origen. Si ya existe una reserva para
+  // saga_id, devuelve la misma reservation_id sin descontar recursos otra vez.
+  rpc Reserve(ReserveRequest) returns (ReserveResponse);
+
+  // Release libera la reserva de la saga. Si no existe, responde released=true.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // NotifyAllocation informa al agente que su asignación fue confirmada.
+  rpc NotifyAllocation(NotifyAllocationRequest) returns (NotifyAllocationResponse);
+}
+
+message Resource {
+  double cpu = 1;
+  uint64 ram_mb = 2;
+  double bandwidth_mbps = 3;
+}
+
+message ReserveRequest {
+  string saga_id = 1;
+  // node_id es el nodo al que va dirigida la reserva. El agente lo verifica.
+  uint64 node_id = 2;
+  Resource resource = 3;
+}
+
+message ReserveResponse {
+  bool accepted = 1;
+  string reservation_id = 2;
+  // reason solo tiene valor cuando accepted es false.
+  string reason = 3;
+}
+
+message ReleaseRequest {
+  string saga_id = 1;
+  uint64 node_id = 2;
+  string reservation_id = 3;
+}
+
+message ReleaseResponse {
+  bool released = 1;
+}
+
+message NotifyAllocationRequest {
+  string saga_id = 1;
+  uint64 node_id = 2;
+}
+
+message NotifyAllocationResponse {
+  bool acknowledged = 1;
+}
