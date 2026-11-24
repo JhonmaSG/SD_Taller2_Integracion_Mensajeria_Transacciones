@@ -67,6 +67,7 @@ func (p *Publisher) Publish(ctx context.Context, msg model.Message) error {
 	for attempt := 1; ; attempt++ {
 		err := p.publishOnce(ctx, queue, msg.ID(), body)
 		if err == nil {
+			log.Printf("rabbitmq: published message=%s queue=%s attempt=%d", msg.ID(), queue, attempt)
 			return nil
 		}
 		p.resetLocked()

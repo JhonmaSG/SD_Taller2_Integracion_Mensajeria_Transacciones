@@ -61,7 +61,7 @@ func publishDeps(clock *publishClockFake, pub *publisherFake) PublishDeps {
 func TestMetricsReporterPublishesReadingsWithLamportStamp(t *testing.T) {
 	clock := &publishClockFake{value: 47}
 	pub := &publisherFake{}
-	reporter, err := NewMetricsReporter(publishDeps(clock, pub), samplerFake{metrics: ports.MachineMetrics{CPUTempC: 55, FreeRAMMB: 1024, BandwidthMbps: 100}})
+	reporter, err := NewMetricsReporter(publishDeps(clock, pub), samplerFake{metrics: ports.MachineMetrics{CPUTempC: 55, FreeRAMMB: 1024, BandwidthMbps: 100}}, nil)
 	if err != nil {
 		t.Fatalf("NewMetricsReporter: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestMetricsReporterPublishesReadingsWithLamportStamp(t *testing.T) {
 
 func TestMetricsReporterReturnsSamplerError(t *testing.T) {
 	pub := &publisherFake{}
-	reporter, _ := NewMetricsReporter(publishDeps(&publishClockFake{}, pub), samplerFake{err: errors.New("no sensor")})
+	reporter, _ := NewMetricsReporter(publishDeps(&publishClockFake{}, pub), samplerFake{err: errors.New("no sensor")}, nil)
 	if err := reporter.Report(context.Background()); err == nil {
 		t.Fatal("sampler failure should be returned")
 	}
@@ -128,8 +128,69 @@ func TestPublishUseCasesValidateDependencies(t *testing.T) {
 	if _, err := NewLeadershipAnnouncer(PublishDeps{NodeID: 0}); err == nil {
 		t.Fatal("zero node id should fail")
 	}
-	if _, err := NewMetricsReporter(publishDeps(&publishClockFake{}, &publisherFake{}), nil); err == nil {
+	if _, err := NewMetricsReporter(publishDeps(&publishClockFake{}, &publisherFake{}), nil, nil); err == nil {
 		t.Fatal("nil sampler should fail")
+	}
+}
+
+type countingSampler struct{ calls int }
+
+func (s *countingSampler) ReadMetrics(_ context.Context) (ports.MachineMetrics, error) {
+	s.calls++
+	return ports.MachineMetrics{CPUTempC: 40, FreeRAMMB: 512, BandwidthMbps: 100}, nil
+}
+
+func TestMetricsReporterSkipsWhenCoordinator(t *testing.T) {
+	pub := &publisherFake{}
+	sampler := &countingSampler{}
+	reporter, err := NewMetricsReporter(publishDeps(&publishClockFake{}, pub), sampler, func() bool { return true })
+	if err != nil {
+		t.Fatalf("NewMetricsReporter: %v", err)
+	}
+
+	err = reporter.Report(context.Background())
+	if !errors.Is(err, ErrCoordinatorSkipsMetrics) {
+		t.Fatalf("Report error = %v, want ErrCoordinatorSkipsMetrics", err)
+	}
+	if len(pub.published) != 0 {
+		t.Fatalf("coordinator published %d messages, want 0", len(pub.published))
+	}
+	if sampler.calls != 0 {
+		t.Fatalf("coordinator read the sensor %d times, want 0", sampler.calls)
+	}
+}
+
+func TestMetricsReporterResumesPublishingAfterLosingCoordinatorRole(t *testing.T) {
+	pub := &publisherFake{}
+	coordinator := true
+	reporter, err := NewMetricsReporter(publishDeps(&publishClockFake{}, pub), &countingSampler{}, func() bool { return coordinator })
+	if err != nil {
+		t.Fatalf("NewMetricsReporter: %v", err)
+	}
+
+	if err := reporter.Report(context.Background()); !errors.Is(err, ErrCoordinatorSkipsMetrics) {
+		t.Fatalf("Report as coordinator error = %v, want ErrCoordinatorSkipsMetrics", err)
+	}
+	coordinator = false
+	if err := reporter.Report(context.Background()); err != nil {
+		t.Fatalf("Report as follower: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published %d messages after role change, want 1", len(pub.published))
+	}
+}
+
+func TestMetricsReporterWithoutCoordinatorCheckPublishes(t *testing.T) {
+	pub := &publisherFake{}
+	reporter, err := NewMetricsReporter(publishDeps(&publishClockFake{}, pub), &countingSampler{}, nil)
+	if err != nil {
+		t.Fatalf("NewMetricsReporter: %v", err)
+	}
+	if err := reporter.Report(context.Background()); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published %d messages, want 1", len(pub.published))
 	}
 }
 

@@ -18,9 +18,25 @@ func TestParseMemAvailableMBReadsMemAvailable(t *testing.T) {
 	}
 }
 
+func TestParseWindowsFreeMemoryMBConvertsKilobytes(t *testing.T) {
+	// FreePhysicalMemory llega en kB, con salto de línea al final desde PowerShell.
+	got, err := parseWindowsFreeMemoryMB("1048576\r\n")
+	if err != nil || got != 1024 {
+		t.Fatalf("parseWindowsFreeMemoryMB = %d, %v; want 1024", got, err)
+	}
+}
+
+func TestParseWindowsFreeMemoryMBRejectsInvalidOutput(t *testing.T) {
+	for _, output := range []string{"", "no es un numero", "-5"} {
+		if _, err := parseWindowsFreeMemoryMB(output); err == nil {
+			t.Fatalf("parseWindowsFreeMemoryMB(%q) should fail", output)
+		}
+	}
+}
+
 func TestMachineMetricsSamplerReportsZeroTempWithoutSensor(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("sampler only reads Linux sources")
+		t.Skip("sampler reads /proc/meminfo on Linux")
 	}
 	sampler := &MachineMetricsSampler{
 		bandwidth: func(context.Context) int64 { return 100 },

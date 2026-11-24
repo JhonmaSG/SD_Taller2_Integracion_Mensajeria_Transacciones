@@ -14,8 +14,8 @@ import (
 
 const memInfoPath = "/proc/meminfo"
 
-// MachineMetricsSampler lee las métricas del host para el tópico metrics. Hoy
-// solo está implementado para Linux. En otros sistemas devuelve error.
+// MachineMetricsSampler lee las métricas del host para el tópico metrics.
+// Está implementado para Linux y Windows. En otros sistemas devuelve error.
 type MachineMetricsSampler struct {
 	bandwidth func(context.Context) int64
 	readFile  func(string) ([]byte, error)
@@ -37,14 +37,21 @@ func (s *MachineMetricsSampler) ReadMetrics(ctx context.Context) (ports.MachineM
 	if ctx == nil {
 		return ports.MachineMetrics{}, errors.New("context must not be nil")
 	}
-	if runtime.GOOS != "linux" {
+
+	var freeRAM uint64
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		freeRAM, err = s.freeRAMMB()
+	case "windows":
+		freeRAM, err = windowsFreeRAMMB(ctx)
+	default:
 		return ports.MachineMetrics{}, fmt.Errorf("machine metrics are not implemented for %s", runtime.GOOS)
 	}
-
-	freeRAM, err := s.freeRAMMB()
 	if err != nil {
 		return ports.MachineMetrics{}, err
 	}
+
 	return ports.MachineMetrics{
 		CPUTempC:      0,
 		FreeRAMMB:     freeRAM,
@@ -74,4 +81,22 @@ func parseMemAvailableMB(raw []byte) (uint64, error) {
 		return kilobytes / 1024, nil
 	}
 	return 0, errors.New("MemAvailable not found in meminfo")
+}
+
+// windowsFreeRAMMB consulta la memoria física libre de Windows con PowerShell.
+func windowsFreeRAMMB(ctx context.Context) (uint64, error) {
+	output, err := runPowerShell(ctx, "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory")
+	if err != nil {
+		return 0, fmt.Errorf("read Windows free memory: %w", err)
+	}
+	return parseWindowsFreeMemoryMB(output)
+}
+
+// parseWindowsFreeMemoryMB convierte FreePhysicalMemory (en kB) a MB.
+func parseWindowsFreeMemoryMB(output string) (uint64, error) {
+	kilobytes, err := strconv.ParseUint(strings.TrimSpace(output), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse Windows free memory: %w", err)
+	}
+	return kilobytes / 1024, nil
 }

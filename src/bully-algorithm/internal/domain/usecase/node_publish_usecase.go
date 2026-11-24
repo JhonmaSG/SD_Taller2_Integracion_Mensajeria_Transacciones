@@ -12,6 +12,11 @@ import (
 	"github.com/JhonmaSG/SD_Taller1_Coordinacion_y_datos_del_sistema/src/bully-algorithm/internal/ports"
 )
 
+// ErrCoordinatorSkipsMetrics indica que el reporte se omitió porque el nodo es
+// coordinador. El coordinador consume la cola metrics y no publica sus propias
+// métricas. No es un fallo de publicación.
+var ErrCoordinatorSkipsMetrics = errors.New("coordinator does not publish its own metrics")
+
 // NewRandomMessageID genera un message_id único para cada mensaje publicado.
 func NewRandomMessageID() model.MessageID {
 	var raw [16]byte
@@ -47,27 +52,39 @@ func (d PublishDeps) validate() error {
 }
 
 // MetricsReporter lee las métricas del host y las publica en el tópico metrics.
-// Lo ejecutan todos los nodos, sin importar su rol.
+// Lo ejecutan los nodos seguidores. El coordinador no publica sus métricas
+// porque consume la cola metrics.
 type MetricsReporter struct {
-	deps    PublishDeps
-	sampler ports.MachineMetricsReader
+	deps          PublishDeps
+	sampler       ports.MachineMetricsReader
+	isCoordinator func() bool
 }
 
-// NewMetricsReporter valida las dependencias y crea el reportador.
-func NewMetricsReporter(deps PublishDeps, sampler ports.MachineMetricsReader) (*MetricsReporter, error) {
+// NewMetricsReporter valida las dependencias y crea el reportador. isCoordinator
+// indica si el nodo local es coordinador en este momento. Si es nil, el nodo
+// nunca se considera coordinador.
+func NewMetricsReporter(deps PublishDeps, sampler ports.MachineMetricsReader, isCoordinator func() bool) (*MetricsReporter, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
 	}
 	if sampler == nil {
 		return nil, errors.New("machine metrics reader must not be nil")
 	}
-	return &MetricsReporter{deps: withPublishDefaults(deps), sampler: sampler}, nil
+	if isCoordinator == nil {
+		isCoordinator = func() bool { return false }
+	}
+	return &MetricsReporter{deps: withPublishDefaults(deps), sampler: sampler, isCoordinator: isCoordinator}, nil
 }
 
 // Report toma una lectura, avanza el reloj de Lamport y publica el reporte.
+// Si el nodo es coordinador, devuelve ErrCoordinatorSkipsMetrics sin leer el
+// sensor ni publicar.
 func (r *MetricsReporter) Report(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("context must not be nil")
+	}
+	if r.isCoordinator() {
+		return ErrCoordinatorSkipsMetrics
 	}
 	readings, err := r.sampler.ReadMetrics(ctx)
 	if err != nil {

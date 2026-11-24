@@ -125,7 +125,7 @@ func newAsyncRuntime(
 	if err != nil {
 		return nil, err
 	}
-	reporter, err := usecase.NewMetricsReporter(deps, system.NewMachineMetricsSampler())
+	reporter, err := usecase.NewMetricsReporter(deps, system.NewMachineMetricsSampler(), runtime.isCoordinator)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +227,13 @@ func (r *asyncRuntime) onRole(event usecase.RoleEvent) {
 	}
 }
 
+// isCoordinator indica si el nodo local es coordinador según el último cambio de rol.
+func (r *asyncRuntime) isCoordinator() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.wantCoordinator
+}
+
 // shutdown detiene el consumo, cierra el publicador y el almacén.
 func (r *asyncRuntime) shutdown() {
 	if !r.enabled() {
@@ -270,8 +277,8 @@ func (r *asyncRuntime) reportMetrics() {
 		case <-ticker.C:
 			// El reporte expira antes del siguiente periodo para no acumular intentos.
 			reportCtx, cancel := context.WithTimeout(r.ctx, r.cfg.MetricsInterval)
-			if err := r.reporter.Report(reportCtx); err != nil {
-				log.Printf("metrics report not published: %v", err)
+			if err := r.reporter.Report(reportCtx); err != nil && !errors.Is(err, usecase.ErrCoordinatorSkipsMetrics) {
+				log.Printf("ERROR: could not publish metrics to RabbitMQ, will retry at the next interval: %v", err)
 			}
 			cancel()
 		}
